@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestMockStacksHaveOrderedPullRequests(t *testing.T) {
 	if len(mockStacks) == 0 {
@@ -45,5 +48,56 @@ func TestTeamAssignmentUsesViewerMembership(t *testing.T) {
 	stacks := buildStacks("acme/app", "main", "bob", map[string]bool{"acme/platform": true}, prs)
 	if !stacks[0].Team {
 		t.Fatal("expected stack to match the viewer's requested team")
+	}
+}
+
+func TestMakeNativeStackKeepsMergedAncestors(t *testing.T) {
+	mergedAt := time.Now().Add(-time.Hour)
+	native := nativeStack{Number: 205}
+	native.Base.Ref = "main"
+	native.PullRequests = []nativeStackPullRequest{
+		{Number: 201, Title: "Merged foundation", State: "closed", MergedAt: &mergedAt},
+		{Number: 202, Title: "Open follow-up", State: "open"},
+	}
+	native.PullRequests[0].Head.Ref = "feature-1"
+	native.PullRequests[0].User.Login = "alice"
+	native.PullRequests[1].Head.Ref = "feature-2"
+	native.PullRequests[1].User.Login = "alice"
+
+	open := pullRequest{
+		Number: 202, Title: "Open follow-up", Branch: "feature-2", Author: "alice", State: "open",
+		Review: "approved", Checks: "passing", UpdatedAt: time.Now(), Updated: "just now",
+	}
+	result := makeNativeStack("acme/app", "main", "alice", map[string]bool{}, native, []pullRequest{open})
+
+	if result.ID != "acme-app-stack-205" {
+		t.Fatalf("unexpected native stack id: %q", result.ID)
+	}
+	if len(result.PRs) != 2 {
+		t.Fatalf("expected both native entries, got %d", len(result.PRs))
+	}
+	if result.PRs[0].State != "merged" || result.PRs[0].Review != "merged" {
+		t.Fatalf("expected merged ancestor, got %#v", result.PRs[0])
+	}
+	if result.PRs[1].MergeTarget != "#201" {
+		t.Fatalf("expected durable native ordering, got target %q", result.PRs[1].MergeTarget)
+	}
+	if !result.Mine {
+		t.Fatal("expected stack to belong to the viewer")
+	}
+}
+
+func TestConvertPullRequestIncludesMergeQueueDetails(t *testing.T) {
+	item := graphQLPullRequest{Number: 101, State: "OPEN", UpdatedAt: time.Now()}
+	item.MergeQueueEntry = &graphQLMergeQueueEntry{
+		Position: 3, State: "AWAITING_CHECKS", EstimatedTimeToMerge: 180,
+	}
+
+	pr := convertPullRequest(item, "main")
+	if !pr.Queued || pr.QueuePosition != 3 || pr.QueueState != "awaiting_checks" || pr.QueueETA != 180 {
+		t.Fatalf("unexpected merge queue details: %#v", pr)
+	}
+	if pr.State != "open" {
+		t.Fatalf("queue membership should not replace PR state, got %q", pr.State)
 	}
 }

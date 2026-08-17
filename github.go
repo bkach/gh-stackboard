@@ -17,7 +17,10 @@ query($owner: String!, $name: String!, $cursor: String) {
     pullRequests(states: OPEN, first: 50, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        number title url isDraft updatedAt headRefName baseRefName additions deletions
+        number title url state mergedAt isDraft updatedAt headRefName baseRefName additions deletions
+        isInMergeQueue
+        mergeQueueEntry { position state enqueuedAt estimatedTimeToMerge }
+        stack { id number baseRefName }
         author { login }
         headRepository { nameWithOwner }
         baseRepository { nameWithOwner }
@@ -59,16 +62,20 @@ type graphQLResponse struct {
 }
 
 type graphQLPullRequest struct {
-	Number      int       `json:"number"`
-	Title       string    `json:"title"`
-	URL         string    `json:"url"`
-	IsDraft     bool      `json:"isDraft"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-	HeadRefName string    `json:"headRefName"`
-	BaseRefName string    `json:"baseRefName"`
-	Additions   int       `json:"additions"`
-	Deletions   int       `json:"deletions"`
-	Author      struct {
+	Number          int                     `json:"number"`
+	Title           string                  `json:"title"`
+	URL             string                  `json:"url"`
+	IsDraft         bool                    `json:"isDraft"`
+	State           string                  `json:"state"`
+	MergedAt        *time.Time              `json:"mergedAt"`
+	IsInMergeQueue  bool                    `json:"isInMergeQueue"`
+	MergeQueueEntry *graphQLMergeQueueEntry `json:"mergeQueueEntry"`
+	UpdatedAt       time.Time               `json:"updatedAt"`
+	HeadRefName     string                  `json:"headRefName"`
+	BaseRefName     string                  `json:"baseRefName"`
+	Additions       int                     `json:"additions"`
+	Deletions       int                     `json:"deletions"`
+	Author          struct {
 		Login string `json:"login"`
 	} `json:"author"`
 	HeadRepository struct {
@@ -81,6 +88,11 @@ type graphQLPullRequest struct {
 		TotalCount int `json:"totalCount"`
 	} `json:"comments"`
 	ReviewDecision string `json:"reviewDecision"`
+	Stack          struct {
+		ID          string `json:"id"`
+		Number      int    `json:"number"`
+		BaseRefName string `json:"baseRefName"`
+	} `json:"stack"`
 	ReviewRequests struct {
 		Nodes []struct {
 			RequestedReviewer struct {
@@ -102,6 +114,41 @@ type graphQLPullRequest struct {
 			} `json:"commit"`
 		} `json:"nodes"`
 	} `json:"commits"`
+}
+
+type graphQLMergeQueueEntry struct {
+	Position             int       `json:"position"`
+	State                string    `json:"state"`
+	EnqueuedAt           time.Time `json:"enqueuedAt"`
+	EstimatedTimeToMerge int       `json:"estimatedTimeToMerge"`
+}
+
+type nativeStack struct {
+	ID     int64 `json:"id"`
+	Number int   `json:"number"`
+	Open   bool  `json:"open"`
+	Base   struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+	PullRequests []nativeStackPullRequest `json:"pull_requests"`
+}
+
+type nativeStackPullRequest struct {
+	Number   int        `json:"number"`
+	Title    string     `json:"title"`
+	State    string     `json:"state"`
+	MergedAt *time.Time `json:"merged_at"`
+	Draft    bool       `json:"draft"`
+	HTMLURL  string     `json:"html_url"`
+	Head     struct {
+		Ref string `json:"ref"`
+	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
 }
 
 func loadGitHub(repositories []string) (apiResponse, error) {
@@ -137,7 +184,8 @@ func loadGitHub(repositories []string) (apiResponse, error) {
 	teams, teamWarning := fetchViewerTeams()
 	type repositoryResult struct {
 		requested, repository, defaultBranch string
-		prs                                  []pullRequest
+		stacks                               []stack
+		warnings                             []string
 		err                                  error
 	}
 	results := make(chan repositoryResult, len(normalized))
@@ -148,7 +196,12 @@ func loadGitHub(repositories []string) (apiResponse, error) {
 			defer func() { <-concurrency }()
 			owner, name, _ := strings.Cut(repository, "/")
 			prs, canonical, defaultBranch, fetchErr := fetchPullRequests(owner, name)
-			results <- repositoryResult{requested: repository, repository: canonical, defaultBranch: defaultBranch, prs: prs, err: fetchErr}
+			if fetchErr != nil {
+				results <- repositoryResult{requested: repository, err: fetchErr}
+				return
+			}
+			built, stackWarnings := buildRepositoryStacks(owner, name, canonical, defaultBranch, login, teams, prs)
+			results <- repositoryResult{requested: repository, repository: canonical, defaultBranch: defaultBranch, stacks: built, warnings: stackWarnings}
 		}()
 	}
 
@@ -164,7 +217,8 @@ func loadGitHub(repositories []string) (apiResponse, error) {
 			continue
 		}
 		loadedRepositories = append(loadedRepositories, result.repository)
-		stacks = append(stacks, buildStacks(result.repository, result.defaultBranch, login, teams, result.prs)...)
+		warnings = append(warnings, result.warnings...)
+		stacks = append(stacks, result.stacks...)
 	}
 	if len(loadedRepositories) == 0 {
 		return apiResponse{}, fmt.Errorf("could not load any repositories: %s", strings.Join(warnings, "; "))
@@ -246,12 +300,122 @@ func convertPullRequest(item graphQLPullRequest, defaultBranch string) pullReque
 	if baseRepository == "" {
 		baseRepository = item.HeadRepository.NameWithOwner
 	}
+	state := strings.ToLower(item.State)
+	queued := item.IsInMergeQueue || item.MergeQueueEntry != nil
+	queuePosition, queueState, queueETA := 0, "", 0
+	if item.MergeQueueEntry != nil {
+		queuePosition = item.MergeQueueEntry.Position
+		queueState = strings.ToLower(item.MergeQueueEntry.State)
+		queueETA = item.MergeQueueEntry.EstimatedTimeToMerge
+	}
 	return pullRequest{
 		Number: item.Number, Title: item.Title, URL: item.URL, Branch: item.HeadRefName, Author: item.Author.Login,
 		Review: review, Checks: checks, Comments: item.Comments.TotalCount, Additions: item.Additions, Deletions: item.Deletions,
 		Updated: relativeTime(item.UpdatedAt), MergeTarget: item.BaseRefName, HeadRepository: item.HeadRepository.NameWithOwner,
 		BaseRepository: baseRepository, RequestedUsers: users, RequestedTeams: teams, UpdatedAt: item.UpdatedAt,
+		State: state, Queued: queued, QueuePosition: queuePosition, QueueState: queueState, QueueETA: queueETA,
+		StackID: item.Stack.ID, StackNumber: item.Stack.Number,
 	}
+}
+
+func buildRepositoryStacks(owner, name, repository, defaultBranch, viewerLogin string, viewerTeams map[string]bool, prs []pullRequest) ([]stack, []string) {
+	byStack := map[int][]pullRequest{}
+	var unstacked []pullRequest
+	for _, pr := range prs {
+		if pr.StackNumber == 0 {
+			unstacked = append(unstacked, pr)
+			continue
+		}
+		byStack[pr.StackNumber] = append(byStack[pr.StackNumber], pr)
+	}
+
+	type result struct {
+		number int
+		stack  nativeStack
+		err    error
+	}
+	results := make(chan result, len(byStack))
+	concurrency := make(chan struct{}, 4)
+	for number := range byStack {
+		go func() {
+			concurrency <- struct{}{}
+			defer func() { <-concurrency }()
+			native, err := fetchNativeStack(owner, name, number)
+			results <- result{number: number, stack: native, err: err}
+		}()
+	}
+
+	var stacks []stack
+	var warnings []string
+	for range byStack {
+		result := <-results
+		openPRs := byStack[result.number]
+		if result.err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s stack %d: %v; using branch relationships", repository, result.number, result.err))
+			unstacked = append(unstacked, openPRs...)
+			continue
+		}
+		stacks = append(stacks, makeNativeStack(repository, defaultBranch, viewerLogin, viewerTeams, result.stack, openPRs))
+	}
+	stacks = append(stacks, buildStacks(repository, defaultBranch, viewerLogin, viewerTeams, unstacked)...)
+	sort.Slice(stacks, func(i, j int) bool { return stacks[i].UpdatedAt.After(stacks[j].UpdatedAt) })
+	return stacks, warnings
+}
+
+func fetchNativeStack(owner, name string, number int) (nativeStack, error) {
+	output, err := ghOutput("api", fmt.Sprintf("repos/%s/%s/stacks/%d", owner, name, number))
+	if err != nil {
+		return nativeStack{}, err
+	}
+	var result nativeStack
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		return nativeStack{}, fmt.Errorf("decode GitHub stack response: %w", err)
+	}
+	return result, nil
+}
+
+func makeNativeStack(repository, defaultBranch, viewerLogin string, viewerTeams map[string]bool, native nativeStack, openPRs []pullRequest) stack {
+	details := map[int]pullRequest{}
+	for _, pr := range openPRs {
+		details[pr.Number] = pr
+	}
+	base := native.Base.Ref
+	if base == "" {
+		base = defaultBranch
+	}
+	ordered := make([]pullRequest, 0, len(native.PullRequests))
+	for index, item := range native.PullRequests {
+		pr, found := details[item.Number]
+		if !found {
+			updatedAt := time.Time{}
+			updated := ""
+			state := item.State
+			review := "closed"
+			if item.MergedAt != nil {
+				updatedAt = *item.MergedAt
+				updated = relativeTime(updatedAt)
+				state = "merged"
+				review = "merged"
+			}
+			if item.Draft && state == "open" {
+				review = "draft"
+			}
+			pr = pullRequest{
+				Number: item.Number, Title: item.Title, URL: item.HTMLURL, Branch: item.Head.Ref, Author: item.User.Login,
+				Review: review, Checks: "", Updated: updated, UpdatedAt: updatedAt, State: state,
+				HeadRepository: repository, BaseRepository: repository, StackNumber: native.Number,
+			}
+		}
+		if index == 0 {
+			pr.MergeTarget = base
+		} else {
+			pr.MergeTarget = fmt.Sprintf("#%d", native.PullRequests[index-1].Number)
+		}
+		ordered = append(ordered, pr)
+	}
+	result := makeStack(repository, viewerLogin, viewerTeams, ordered)
+	result.ID = fmt.Sprintf("%s-stack-%d", strings.ReplaceAll(repository, "/", "-"), native.Number)
+	return result
 }
 
 func fetchViewerTeams() (map[string]bool, string) {

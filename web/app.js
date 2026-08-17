@@ -5,18 +5,37 @@ const template = document.querySelector("#stack-template");
 const search = document.querySelector("#search");
 
 function stackStatus(stack) {
-  const failing = stack.prs.find((pr) => pr.checks === "failing");
+  const active = stack.prs.filter((pr) => !["merged", "closed"].includes(pr.state));
+  if (!active.length) return { label: "Landed", tone: "purple", action: "Stack complete" };
+  const queued = active.filter((pr) => pr.queued).sort((a, b) => (a.queuePosition || Infinity) - (b.queuePosition || Infinity))[0];
+  if (queued) {
+    const queueState = {
+      awaiting_checks: ["Queue checks", "purple"],
+      mergeable: ["Queued", "green"],
+      unmergeable: ["Queue blocked", "red"],
+      locked: ["Queue locked", "amber"],
+      queued: ["Queued", "amber"],
+    }[queued.queueState] || ["Queued", "amber"];
+    const position = queued.queuePosition ? `#${queued.queuePosition}` : "In queue";
+    const eta = queued.queueEtaSeconds ? ` · ~${formatDuration(queued.queueEtaSeconds)}` : "";
+    return { label: queueState[0], tone: queueState[1], action: `${position}${eta}` };
+  }
+  const failing = active.find((pr) => pr.checks === "failing");
   if (failing) return { label: "CI blocked", tone: "red", action: `Fix CI on #${failing.number}` };
-  const changes = stack.prs.find((pr) => pr.review === "changes");
+  const changes = active.find((pr) => pr.review === "changes");
   if (changes) return { label: "Changes needed", tone: "amber", action: `Address review on #${changes.number}` };
-  const review = stack.prs.find((pr) => pr.review === "waiting");
-  if (review) return { label: "Review needed", tone: "purple", action: `Review #${review.number}` };
-  const draft = stack.prs.find((pr) => pr.review === "draft");
+  const draft = active.find((pr) => pr.review === "draft");
   if (draft) return { label: "In progress", tone: "purple", action: `Finish draft #${draft.number}` };
-  return { label: "Ready to land", tone: "green", action: `Merge #${stack.prs[0].number}` };
+  const running = active.find((pr) => pr.checks === "running");
+  if (running) return { label: "Checks running", tone: "purple", action: `Wait for CI on #${running.number}` };
+  const review = active.find((pr) => pr.review === "waiting");
+  if (review) return { label: "Review needed", tone: "purple", action: `Review #${review.number}` };
+  return { label: "Ready to land", tone: "green", action: `Merge #${active[0].number}` };
 }
 
 function reviewSignal(pr) {
+  if (pr.state === "merged") return ["Merged", "merged"];
+  if (pr.state === "closed") return ["Closed", "closed"];
   if (pr.review === "approved") return ["✓ Approved", "pass"];
   if (pr.review === "changes") return ["↻ Changes requested", "fail"];
   if (pr.review === "draft") return ["◌ Draft", "draft"];
@@ -24,6 +43,13 @@ function reviewSignal(pr) {
 }
 
 function checksSignal(pr) {
+  if (["merged", "closed"].includes(pr.state)) return ["", "closed"];
+  if (pr.queued) {
+    if (pr.queueState === "awaiting_checks") return ["◌ Queue checks", "wait"];
+    if (pr.queueState === "unmergeable") return ["× Queue blocked", "fail"];
+    if (pr.queueState === "mergeable") return ["✓ Queue ready", "pass"];
+    return [`◌ Queued${pr.queuePosition ? ` #${pr.queuePosition}` : ""}`, "queued"];
+  }
   if (pr.checks === "passing") return ["✓ Checks passing", "pass"];
   if (pr.checks === "failing") return ["× Checks failing", "fail"];
   return ["◌ Checks running", "wait"];
@@ -33,7 +59,18 @@ function matchesView(stack) {
   if (state.view === "mine") return stack.mine;
   if (state.view === "assigned") return stack.assigned;
   if (state.view === "team") return stack.team;
+  if (state.view === "queue") return stack.prs.some((pr) => pr.queued);
   return true;
+}
+
+function queuePosition(stack) {
+  return Math.min(...stack.prs.filter((pr) => pr.queued && pr.queuePosition).map((pr) => pr.queuePosition), Infinity);
+}
+
+function formatDuration(seconds) {
+  if (seconds < 60) return "<1m";
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 3600)}h`;
 }
 
 function matchesQuery(stack) {
@@ -54,12 +91,13 @@ function renderPR(pr, index) {
     <span class="pr-copy"><strong>${title}</strong><small><code>${escapeHTML(pr.branch)}</code> · ${escapeHTML(pr.updated)}</small></span>
     <span class="signal checks-signal ${checksClass}">${checks}</span>
     <span class="signal review-signal ${reviewClass}">${review}</span>
-    <span class="diff"><b>+${pr.additions}</b><i>−${pr.deletions}</i></span>`;
+    <span class="diff">${pr.state === "merged" || pr.state === "closed" ? "" : `<b>+${pr.additions}</b><i>−${pr.deletions}</i>`}</span>`;
   return row;
 }
 
 function render() {
   const visible = state.stacks.filter((stack) => matchesView(stack) && matchesQuery(stack));
+  if (state.view === "queue") visible.sort((a, b) => queuePosition(a) - queuePosition(b));
   list.replaceChildren();
 
   if (!visible.length) {
@@ -100,7 +138,8 @@ function render() {
     list.append(fragment);
   });
 
-  document.querySelector("#result-summary").textContent = `${visible.length} stack${visible.length === 1 ? "" : "s"} · ${visible.reduce((sum, stack) => sum + stack.prs.length, 0)} pull requests`;
+  const pullRequestCount = visible.reduce((sum, stack) => sum + stack.prs.length, 0);
+  document.querySelector("#result-summary").textContent = `${visible.length} stack${visible.length === 1 ? "" : "s"} · ${pullRequestCount} pull request${pullRequestCount === 1 ? "" : "s"}`;
 }
 
 function updateCounts() {
@@ -108,6 +147,7 @@ function updateCounts() {
   document.querySelector("#count-mine").textContent = state.stacks.filter((stack) => stack.mine).length;
   document.querySelector("#count-assigned").textContent = state.stacks.filter((stack) => stack.assigned).length;
   document.querySelector("#count-team").textContent = state.stacks.filter((stack) => stack.team).length;
+  document.querySelector("#count-queue").textContent = state.stacks.reduce((total, stack) => total + stack.prs.filter((pr) => pr.queued).length, 0);
 }
 
 async function load() {

@@ -12,7 +12,7 @@ var mockStacks = []stack{
 	{
 		ID: "search-metrics", Title: "Search indexing observability", Repository: "acme/search", Owner: "Sam Rivera", Initials: "SR", Assigned: true, Team: true, Updated: "34m ago",
 		PRs: []pullRequest{
-			{Number: 201, Title: "Record indexing latency", Branch: "search/index-latency", Author: "srivera", Review: "approved", Checks: "passing", Comments: 4, Additions: 226, Deletions: 18, Updated: "3d ago", MergeTarget: "main"},
+			{Number: 201, Title: "Record indexing latency", Branch: "search/index-latency", Author: "srivera", Review: "approved", Checks: "passing", Comments: 4, Additions: 226, Deletions: 18, Updated: "3d ago", MergeTarget: "main", Queued: true, QueuePosition: 2, QueueState: "awaiting_checks", QueueETA: 240},
 			{Number: 205, Title: "Add index health dashboard", Branch: "search/health-dashboard", Author: "srivera", Review: "waiting", Checks: "failing", Comments: 6, Additions: 488, Deletions: 63, Updated: "1d ago", MergeTarget: "#201"},
 		},
 	},
