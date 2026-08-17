@@ -2,4 +2,5 @@
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec go run "$root" "$@"
+cd "$root"
+exec go run . "$@"
