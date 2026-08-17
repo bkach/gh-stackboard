@@ -10,7 +10,7 @@ function stackStatus(stack) {
   const queued = active.filter((pr) => pr.queued).sort((a, b) => (a.queuePosition || Infinity) - (b.queuePosition || Infinity))[0];
   if (queued) {
     const queueState = {
-      awaiting_checks: ["Queue checks", "purple"],
+      awaiting_checks: ["Queued", "amber"],
       mergeable: ["Queued", "green"],
       unmergeable: ["Queue blocked", "red"],
       locked: ["Queue locked", "amber"],
@@ -147,7 +147,7 @@ function updateCounts() {
   document.querySelector("#count-mine").textContent = state.stacks.filter((stack) => stack.mine).length;
   document.querySelector("#count-assigned").textContent = state.stacks.filter((stack) => stack.assigned).length;
   document.querySelector("#count-team").textContent = state.stacks.filter((stack) => stack.team).length;
-  document.querySelector("#count-queue").textContent = state.stacks.reduce((total, stack) => total + stack.prs.filter((pr) => pr.queued).length, 0);
+  document.querySelector("#count-queue").textContent = state.stacks.filter((stack) => stack.prs.some((pr) => pr.queued)).length;
 }
 
 async function load() {
