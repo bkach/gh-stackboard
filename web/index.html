@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Stackboard</title>
+    <meta name="description" content="A lightweight inbox for GitHub pull request stacks." />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Stackboard home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        Stackboard
+      </a>
+      <div class="header-actions">
+        <span class="source"><span class="source-dot"></span><span id="source-label">Loading…</span></span>
+        <button class="avatar" id="viewer-avatar" aria-label="Account">?</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="controls" aria-label="Stack filters">
+        <div class="tabs" role="tablist">
+          <button role="tab" aria-selected="true" data-view="mine" disabled>Mine <span id="count-mine">–</span></button>
+          <button role="tab" aria-selected="false" data-view="assigned" disabled>Review requested <span id="count-assigned">–</span></button>
+          <button role="tab" aria-selected="false" data-view="team" disabled>Team <span id="count-team">–</span></button>
+          <button role="tab" aria-selected="false" data-view="all" disabled>All <span id="count-all">–</span></button>
+        </div>
+        <label class="search">
+          <span aria-hidden="true">⌕</span>
+          <input id="search" type="search" placeholder="Search stacks" autocomplete="off" disabled />
+        </label>
+      </section>
+
+      <section class="stack-surface" aria-live="polite">
+        <div class="table-head" aria-hidden="true">
+          <span>Stack</span><span>Owner</span><span>Pull requests</span><span>Status</span><span>Next action</span><span></span>
+        </div>
+        <div id="stack-list" class="stack-list">
+          <div class="loading">Loading stacks…</div>
+        </div>
+      </section>
+
+      <footer>
+        <span id="result-summary">—</span>
+        <span id="connection-summary">Local preview</span>
+      </footer>
+    </main>
+
+    <template id="stack-template">
+      <article class="stack-row">
+        <button class="row-summary" aria-expanded="false">
+          <span class="stack-name"><strong></strong><small></small></span>
+          <span class="owner"><i></i><span></span></span>
+          <span class="pr-total"></span>
+          <span class="status-pill"></span>
+          <span class="next-action"></span>
+          <span class="chevron" aria-hidden="true">⌄</span>
+        </button>
+        <div class="stack-detail">
+          <div class="pr-list"></div>
+          <div class="detail-heading">
+            <span>Base</span>
+            <code>main</code>
+            <i></i>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
